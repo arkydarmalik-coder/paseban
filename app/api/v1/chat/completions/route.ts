@@ -66,39 +66,49 @@ export async function POST(request: Request) {
     return jsonError('Missing required field: messages.', 'invalid_request', 'MISSING_MESSAGES', 400)
   }
 
-  // 4. Find model route → pilih provider
-  const modelRoute = await kv.getModelRoute(body.model)
-  if (!modelRoute) {
-    return jsonError(
-      `Model "${body.model}" not found. Check /api/v1/models for available models.`,
-      'model_not_found',
-      'MODEL_NOT_FOUND',
-      404
-    )
-  }
-
-  // 5. Coba tiap provider di route sampe ada key active
   const userId = 'default' // TODO: map dari token ke userId
   const router = new RobinRouter(userId)
 
   let selectedProvider: Provider | null = null
-  let selectedModelId = ''
+  let selectedModelId = body.model // default to requested model
 
-  for (const routeProv of modelRoute.providers) {
-    const provider = await kv.getProvider(userId, routeProv.providerId)
-    if (!provider) continue
+  // 4. Coba cari provider yang support model ini (built-in atau custom)
+  // 4.1. Dari built-in providers (via static MODEL_ROUTES)
+  const modelRoute = await kv.getModelRoute(body.model)
+  if (modelRoute) {
+    for (const routeProv of modelRoute.providers) {
+      const provider = await kv.getProvider(userId, routeProv.providerId)
+      if (!provider) continue
 
-    const result = await router.selectKeyWithRetry(provider, routeProv.model, 3)
-    if (result) {
-      selectedProvider = result.provider
-      selectedModelId = routeProv.model
-      break
+      const result = await router.selectKeyWithRetry(provider, routeProv.model, 3)
+      if (result) {
+        selectedProvider = result.provider
+        selectedModelId = routeProv.model
+        break
+      }
+    }
+  }
+
+  // 4.2. Dari custom providers (cek provider.models)
+  if (!selectedProvider) {
+    const userProviderIds = await kv.getUserProviders(userId)
+    for (const pid of userProviderIds) {
+      const provider = await kv.getProvider(userId, pid)
+      if (!provider || !provider.custom) continue
+
+      if (provider.models.includes(body.model)) {
+        const result = await router.selectKeyWithRetry(provider, body.model, 3)
+        if (result) {
+          selectedProvider = result.provider
+          break
+        }
+      }
     }
   }
 
   if (!selectedProvider) {
     return jsonError(
-      `No available providers for model "${body.model}". All keys exhausted or rate limited.`,
+      `No available providers for model \"${body.model}\". All keys exhausted or rate limited.`,
       'provider_unavailable',
       'NO_AVAILABLE_PROVIDER',
       503
@@ -116,7 +126,7 @@ export async function POST(request: Request) {
   const startTime = Date.now()
 
   try {
-    // 6. Proxy request ke provider
+    // 5. Proxy request ke provider
     const providerUrl = `${decision.baseUrl}/chat/completions`
     const proxyHeaders: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -141,7 +151,7 @@ export async function POST(request: Request) {
     const latency = Date.now() - startTime
     const success = proxyResponse.ok
 
-    // 6a. Handle streaming
+    // 5a. Handle streaming
     if (body.stream && proxyResponse.ok) {
       // Track usage asynchronously
       router.recordResult(decision.providerId, decision.keyId, true, 0, latency, 200).catch(() => {})
@@ -158,7 +168,7 @@ export async function POST(request: Request) {
       })
     }
 
-    // 6b. Handle non-streaming response
+    // 5b. Handle non-streaming response
     if (!proxyResponse.ok) {
       const errorText = await proxyResponse.text().catch(() => 'Unknown provider error')
       await router.recordResult(decision.providerId, decision.keyId, false, 0, latency, proxyResponse.status)
@@ -188,7 +198,7 @@ export async function POST(request: Request) {
       statusCode: 200,
     })
 
-    // 7. Return OpenAI-compatible response
+    // 6. Return OpenAI-compatible response
     const response = {
       ...providerData,
       model: body.model, // return request model, not provider model

@@ -104,7 +104,13 @@ export class InMemoryKV implements KVRepository {
   }
 
   async getModelRoute(model: string): Promise<ModelRoute | null> {
-    return MODEL_ROUTES[model] ?? null
+    // Check static routes first
+    if (MODEL_ROUTES[model]) return MODEL_ROUTES[model]
+
+    // TODO: Dynamic lookup for custom providers (needs userId context)
+    // For now, assume custom models are mapped 1:1 to their provider
+    // This will be properly handled in the main API route logic with userId
+    return null
   }
 
   async recordUsage(userId: string, record: UsageRecord): Promise<void> {
